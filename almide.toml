@@ -1,0 +1,4 @@
+[package]
+name = "slabhra"
+version = "0.1.0"
+description = "Differentiable programming for Almide — reverse-mode autograd, tensors, optimizers. Named for the chain rule (slabhra = chain, Irish)."
