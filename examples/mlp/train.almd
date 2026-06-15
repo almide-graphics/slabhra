@@ -1,0 +1,72 @@
+// slabhra training example — the full loop: forward → backward → Adam → repeat.
+// Trains the tiny MLP to predict class 0 from a fixed input. Loss should fall
+// 0.447 → ~0, matching examples/mlp/train_oracle.py (PyTorch Adam, lr 0.1).
+//
+//   almide run examples/mlp/train.almd      (from the slabhra repo root)
+//
+// Because the tape is functional, a "parameter" is just a value list we hold
+// and update; each step we rebuild the tape from current values, run forward +
+// backward, then Adam-update the values. (A Module abstraction lands later;
+// this shows the mechanism plainly.)
+
+import self.tape as tp
+import self.ops as op
+import self.optim as opt
+
+let TARGET = 0
+
+// build the tape for one forward pass from current param values; returns
+// (tape, loss_node, [param leaf indices]). Param order: W1,b1,W2,b2.
+fn build(w1v: List[Float], b1v: List[Float], w2v: List[Float], b2v: List[Float]) -> (tp.Tape, Int, List[Int]) = {
+  var t = tp.new_tape()
+  t = tp.leaf(t, [0.5, 0.0 - 1.0], 1, 2, false); let x = tp.last(t)
+  t = tp.leaf(t, w1v, 2, 3, true); let w1 = tp.last(t)
+  t = tp.leaf(t, b1v, 1, 3, true); let b1 = tp.last(t)
+  t = tp.leaf(t, w2v, 3, 2, true); let w2 = tp.last(t)
+  t = tp.leaf(t, b2v, 1, 2, true); let b2 = tp.last(t)
+  t = op.matmul(t, x, w1); let xw1 = tp.last(t)
+  t = op.add_bias(t, xw1, b1); let h = tp.last(t)
+  t = op.relu(t, h); let a = tp.last(t)
+  t = op.matmul(t, a, w2); let aw2 = tp.last(t)
+  t = op.add_bias(t, aw2, b2); let z = tp.last(t)
+  t = op.softmax_ce(t, z, TARGET); let loss = tp.last(t)
+  (t, loss, [w1, b1, w2, b2])
+}
+
+effect fn main() -> () = {
+  // params (deterministic init, same as the oracle)
+  var w1v = [0.1, 0.2, 0.0 - 0.3, 0.4, 0.0 - 0.5, 0.6]
+  var b1v = [0.01, 0.0 - 0.02, 0.03]
+  var w2v = [0.7, 0.0 - 0.8, 0.9, 0.1, 0.0 - 0.2, 0.5]
+  var b2v = [0.05, 0.0 - 0.06]
+
+  // Adam state per parameter
+  var s1 = opt.adam_init(list.len(w1v))
+  var s2 = opt.adam_init(list.len(b1v))
+  var s3 = opt.adam_init(list.len(w2v))
+  var s4 = opt.adam_init(list.len(b2v))
+  let lr = 0.1
+
+  var step = 0
+  while step < 101 {
+    let (t, loss, ps) = build(w1v, b1v, w2v, b2v)
+    let grad = op.backward(t, loss)
+    let gw1 = list.get(grad, list.get(ps, 0) ?? 0) ?? []
+    let gb1 = list.get(grad, list.get(ps, 1) ?? 0) ?? []
+    let gw2 = list.get(grad, list.get(ps, 2) ?? 0) ?? []
+    let gb2 = list.get(grad, list.get(ps, 3) ?? 0) ?? []
+
+    if step - (step / 20) * 20 == 0 then {
+      println("step " + int.to_string(step) + "  loss " + float.to_string(tp.item(t, loss)))
+    }
+
+    let n = step + 1
+    let (nw1, ns1) = opt.adam_step(w1v, gw1, s1, n, lr, 0.9, 0.999, 0.00000001)
+    let (nb1, ns2) = opt.adam_step(b1v, gb1, s2, n, lr, 0.9, 0.999, 0.00000001)
+    let (nw2, ns3) = opt.adam_step(w2v, gw2, s3, n, lr, 0.9, 0.999, 0.00000001)
+    let (nb2, ns4) = opt.adam_step(b2v, gb2, s4, n, lr, 0.9, 0.999, 0.00000001)
+    w1v = nw1; b1v = nb1; w2v = nw2; b2v = nb2
+    s1 = ns1; s2 = ns2; s3 = ns3; s4 = ns4
+    step = step + 1
+  }
+}

@@ -1,0 +1,54 @@
+// slabhra.optim — optimizers (SGD, Adam).
+//
+// The tape is rebuilt each step (functional), so an optimizer's job is: given
+// the gradients from backward() and the current parameter VALUES, produce the
+// next parameter values. A training loop then rebuilds the tape from those.
+// Parameters are identified by their leaf node index on the tape.
+//
+// Adam keeps per-parameter (m, v) moment state across steps, stored flat and
+// indexed the same way as the parameter's value list.
+
+import self.tape
+
+// ── SGD: p := p - lr * grad ──
+fn sgd_step(value: List[Float], grad: List[Float], lr: Float) -> List[Float] = {
+  var out: List[Float] = []
+  var i = 0
+  while i < list.len(value) {
+    list.push(out, (list.get(value, i) ?? 0.0) - lr * (list.get(grad, i) ?? 0.0))
+    i = i + 1
+  }
+  out
+}
+
+// ── Adam ──
+// State for one parameter tensor: m and v (same length as the value).
+type AdamState = {
+  m: List[Float],
+  v: List[Float],
+}
+
+fn adam_init(n: Int) -> AdamState = { m: list.repeat(0.0, n), v: list.repeat(0.0, n) }
+
+// one Adam update for a single parameter tensor at step `t` (1-based).
+// returns (new_value, new_state).
+fn adam_step(value: List[Float], grad: List[Float], st: AdamState, t: Int,
+             lr: Float, b1: Float, b2: Float, eps: Float) -> (List[Float], AdamState) = {
+  let tt = int.to_float(t)
+  let bc1 = 1.0 - math.fpow(b1, tt)
+  let bc2 = 1.0 - math.fpow(b2, tt)
+  var nv: List[Float] = []
+  var nm: List[Float] = []
+  var nvv: List[Float] = []
+  var i = 0
+  while i < list.len(value) {
+    let g = list.get(grad, i) ?? 0.0
+    let m = b1 * (list.get(st.m, i) ?? 0.0) + (1.0 - b1) * g
+    let v = b2 * (list.get(st.v, i) ?? 0.0) + (1.0 - b2) * g * g
+    list.push(nm, m)
+    list.push(nvv, v)
+    list.push(nv, (list.get(value, i) ?? 0.0) - lr * (m / bc1) / (math.sqrt(v / bc2) + eps))
+    i = i + 1
+  }
+  (nv, { m: nm, v: nvv })
+}
