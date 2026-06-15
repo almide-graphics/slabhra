@@ -12,22 +12,23 @@ fn fmt(g: List[Float]) -> String =
   g |> list.map((v) => float.to_string(v)) |> list.join(",")
 
 effect fn main() -> () = {
-  // tape is an explicit owned value, threaded through (value-semantic; no
-  // global registry). each op returns the new tape; the node = tp.last(t).
+  // tape is an explicit value threaded by mutable reference (no global
+  // registry). each op records its node in place and returns the node index —
+  // O(1) amortized append (almide#703), no `tp.last(t)` dance.
   var t = tp.new_tape()
-  t = tp.leaf(t, [0.5, 0.0 - 1.0], 1, 2, false); let x = tp.last(t)
-  t = tp.leaf(t, [0.1, 0.2, 0.0 - 0.3, 0.4, 0.0 - 0.5, 0.6], 2, 3, true); let w1 = tp.last(t)
-  t = tp.leaf(t, [0.01, 0.0 - 0.02, 0.03], 1, 3, true); let b1 = tp.last(t)
-  t = tp.leaf(t, [0.7, 0.0 - 0.8, 0.9, 0.1, 0.0 - 0.2, 0.5], 3, 2, true); let w2 = tp.last(t)
-  t = tp.leaf(t, [0.05, 0.0 - 0.06], 1, 2, true); let b2 = tp.last(t)
+  let x = tp.leaf(t, [0.5, 0.0 - 1.0], 1, 2, false)
+  let w1 = tp.leaf(t, [0.1, 0.2, 0.0 - 0.3, 0.4, 0.0 - 0.5, 0.6], 2, 3, true)
+  let b1 = tp.leaf(t, [0.01, 0.0 - 0.02, 0.03], 1, 3, true)
+  let w2 = tp.leaf(t, [0.7, 0.0 - 0.8, 0.9, 0.1, 0.0 - 0.2, 0.5], 3, 2, true)
+  let b2 = tp.leaf(t, [0.05, 0.0 - 0.06], 1, 2, true)
 
   // forward
-  t = op.matmul(t, x, w1); let xw1 = tp.last(t)
-  t = op.add_bias(t, xw1, b1); let h = tp.last(t)
-  t = op.relu(t, h); let a = tp.last(t)
-  t = op.matmul(t, a, w2); let aw2 = tp.last(t)
-  t = op.add_bias(t, aw2, b2); let z = tp.last(t)
-  t = op.softmax_ce(t, z, 1); let loss = tp.last(t)
+  let xw1 = op.matmul(t, x, w1)
+  let h = op.add_bias(t, xw1, b1)
+  let a = op.relu(t, h)
+  let aw2 = op.matmul(t, a, w2)
+  let z = op.add_bias(t, aw2, b2)
+  let loss = op.softmax_ce(t, z, 1)
 
   let grad = op.backward(t, loss)
 

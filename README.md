@@ -17,7 +17,7 @@ Almide program; `slabhra` records the computation and gives you gradients.
 ```
 slabhra/
   src/
-    tensor.almd   Tensor + reverse-mode autograd (flat tape, depth-ordered backward)
+    tape.almd     reverse-mode autograd tape (flat, in-place O(1) append, depth-ordered backward)
     ops.almd      ops + their vjp (gradients delegate to the same forward kernels)
     optim.almd    SGD, Adam
     nn.almd       layers / modules            (later)
@@ -38,10 +38,13 @@ of a **verifiable, multi-target language** rather than a library on top of one:
   liveness — most of that machinery is a *workaround* for the host language not
   owning the tensor type. Almide owns the tensor type, so `slabhra` keeps an
   **explicit, owned tape** and deletes that entire runtime.
-- **Verifiable across targets.** The same model compiles to CPU-SIMD / WASM /
-  WebGPU, and slabhra is built so results stay **bit-identical** across them
+- **Verifiable across targets.** The same model's *inference* (forward pass)
+  compiles to CPU-SIMD / WASM / WebGPU and stays **bit-identical** across them
   (the discipline that took nn's LLM engine to a 1e-6 match with PyTorch and a
-  bit-exact native↔wasm↔WGSL logic circuit).
+  bit-exact native↔wasm↔WGSL logic circuit). The autograd *tape* — a training
+  structure — is in-place O(1) on **native** (you train native; the browser runs
+  inference). Its wasm `mut`-list-append writeback is pending almide#705; until
+  then training is native-only, with no source change needed once it lands.
 - **Non-standard primitives are first-class.** Differentiable logic gates
   (DLGN), ternary, matmul-free — substrates PyTorch/Burn treat as exotic — are
   ordinary ops here. The first examples are gate-native, not FP-matrix-native.

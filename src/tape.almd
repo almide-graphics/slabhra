@@ -32,39 +32,43 @@ fn new_tape() -> Tape = {
 }
 
 fn tlen(t: Tape) -> Int = list.len(t.val)
-// index of the node just appended (use after a push_*/op returns the new tape)
+// index of the most recently appended node.
 fn last(t: Tape) -> Int = list.len(t.val) - 1
 
-// push a node, returning the NEW tape. The node's index is `tlen(t)` of the
-// OLD tape (= last(returned)).
+// push a node in place, returning its index. O(1) amortized: each field is a
+// `list.push` into the `mut`-record's list field (almide#703) — the tape grows
+// like a Vec, not the old O(n²) functional `field + [x]` rebuild. The caller
+// holds the tape as a `var` and threads it by mutable reference; every op
+// records its result node and returns the index directly (no `last(t)` dance).
 //
-// PERF NOTE: this rebuilds the record with `field + [x]` per push = O(n) per
-// push, O(n²) to build an n-node tape. Correct and fine for the current tiny
-// examples, but it caps model size. Root cause is an Almide gap: you cannot
-// `list.push` into a `mut`-record field (almide#703) — a bare `mut List` param
-// pushes in place fine. Once #703 lands, this becomes an O(1)-amortized
-// in-place push with the same record API; until then the value-semantic
-// functional tape is the correct (if quadratic) form.
-fn push_node(t: Tape, value: List[Float], r: Int, c: Int, op: Int,
-             pa: Int, pb: Int, aux: Int, req: Bool) -> Tape = {
+// The parent-depth reads are bound to lets BEFORE the pushes so the immutable
+// reads of `t.depth` finish before the mutable borrow for the pushes begins.
+//
+// TARGET: this in-place tape is NATIVE. A `mut`-list-field push does not yet
+// persist on the wasm target (a reallocating push moves the inline list header
+// and the new pointer is not written back to the caller — almide#705). That is
+// fine for slabhra: the tape is a TRAINING structure and training is native;
+// the browser runs INFERENCE (forward only, no tape). Once #704 lands the same
+// code is bit-identical on wasm with no source change.
+fn push_node(mut t: Tape, value: List[Float], r: Int, c: Int, op: Int,
+             pa: Int, pb: Int, aux: Int, req: Bool) -> Int = {
   let dpa = if pa >= 0 then list.get(t.depth, pa) ?? 0 else (0 - 1)
   let dpb = if pb >= 0 then list.get(t.depth, pb) ?? 0 else (0 - 1)
   let d = (if dpa > dpb then dpa else dpb) + 1
-  {
-    val: t.val + [value],
-    rows: t.rows + [r],
-    cols: t.cols + [c],
-    op: t.op + [op],
-    pa: t.pa + [pa],
-    pb: t.pb + [pb],
-    aux: t.aux + [aux],
-    depth: t.depth + [d],
-    requires: t.requires + [req],
-  }
+  list.push(t.val, value)
+  list.push(t.rows, r)
+  list.push(t.cols, c)
+  list.push(t.op, op)
+  list.push(t.pa, pa)
+  list.push(t.pb, pb)
+  list.push(t.aux, aux)
+  list.push(t.depth, d)
+  list.push(t.requires, req)
+  list.len(t.val) - 1
 }
 
 // a leaf tensor (parameter / input). req = whether to track its gradient.
-fn leaf(t: Tape, value: List[Float], r: Int, c: Int, req: Bool) -> Tape =
+fn leaf(mut t: Tape, value: List[Float], r: Int, c: Int, req: Bool) -> Int =
   push_node(t, value, r, c, 0, 0 - 1, 0 - 1, 0, req)
 
 // accessors
@@ -73,5 +77,5 @@ fn trows(t: Tape, i: Int) -> Int = list.get(t.rows, i) ?? 0
 fn tcols(t: Tape, i: Int) -> Int = list.get(t.cols, i) ?? 0
 
 // scalar convenience
-fn scalar(t: Tape, x: Float, req: Bool) -> Tape = leaf(t, [x], 1, 1, req)
+fn scalar(mut t: Tape, x: Float, req: Bool) -> Int = leaf(t, [x], 1, 1, req)
 fn item(t: Tape, i: Int) -> Float = list.get(tval(t, i), 0) ?? 0.0

@@ -4,9 +4,9 @@
 //
 //   almide run examples/mlp/train.almd      (from the slabhra repo root)
 //
-// Because the tape is functional, a "parameter" is just a value list we hold
-// and update; each step we rebuild the tape from current values, run forward +
-// backward, then Adam-update the values. (A Module abstraction lands later;
+// A "parameter" is just a value list we hold and update; each step we rebuild a
+// fresh tape from current values (O(1)-amortized in-place appends), run forward
+// + backward, then Adam-update the values. (A Module abstraction lands later;
 // this shows the mechanism plainly.)
 
 import self.tape as tp
@@ -19,17 +19,17 @@ let TARGET = 0
 // (tape, loss_node, [param leaf indices]). Param order: W1,b1,W2,b2.
 fn build(w1v: List[Float], b1v: List[Float], w2v: List[Float], b2v: List[Float]) -> (tp.Tape, Int, List[Int]) = {
   var t = tp.new_tape()
-  t = tp.leaf(t, [0.5, 0.0 - 1.0], 1, 2, false); let x = tp.last(t)
-  t = tp.leaf(t, w1v, 2, 3, true); let w1 = tp.last(t)
-  t = tp.leaf(t, b1v, 1, 3, true); let b1 = tp.last(t)
-  t = tp.leaf(t, w2v, 3, 2, true); let w2 = tp.last(t)
-  t = tp.leaf(t, b2v, 1, 2, true); let b2 = tp.last(t)
-  t = op.matmul(t, x, w1); let xw1 = tp.last(t)
-  t = op.add_bias(t, xw1, b1); let h = tp.last(t)
-  t = op.relu(t, h); let a = tp.last(t)
-  t = op.matmul(t, a, w2); let aw2 = tp.last(t)
-  t = op.add_bias(t, aw2, b2); let z = tp.last(t)
-  t = op.softmax_ce(t, z, TARGET); let loss = tp.last(t)
+  let x = tp.leaf(t, [0.5, 0.0 - 1.0], 1, 2, false)
+  let w1 = tp.leaf(t, w1v, 2, 3, true)
+  let b1 = tp.leaf(t, b1v, 1, 3, true)
+  let w2 = tp.leaf(t, w2v, 3, 2, true)
+  let b2 = tp.leaf(t, b2v, 1, 2, true)
+  let xw1 = op.matmul(t, x, w1)
+  let h = op.add_bias(t, xw1, b1)
+  let a = op.relu(t, h)
+  let aw2 = op.matmul(t, a, w2)
+  let z = op.add_bias(t, aw2, b2)
+  let loss = op.softmax_ce(t, z, TARGET)
   (t, loss, [w1, b1, w2, b2])
 }
 

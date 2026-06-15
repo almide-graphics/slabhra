@@ -51,30 +51,42 @@ fn k_add(a: List[Float], b: List[Float]) -> List[Float] = {
 }
 
 // ── ops (forward + record) ──
-// Each returns the NEW tape; the new node's index is tape.last(returned).
+// Each takes the tape by mutable reference, records its result node in place,
+// and returns the new node's index. Reads of `t` are bound to lets before the
+// in-place `tape.push_node` so the immutable borrows end before the mutable one.
 fn req2(t: tape.Tape, a: Int, b: Int) -> Bool =
   (list.get(t.requires, a) ?? false) or (list.get(t.requires, b) ?? false)
 
-fn add(t: tape.Tape, a: Int, b: Int) -> tape.Tape =
-  tape.push_node(t, k_add(tape.tval(t, a), tape.tval(t, b)),
-    tape.trows(t, a), tape.tcols(t, a), 1, a, b, 0, req2(t, a, b))
+fn add(mut t: tape.Tape, a: Int, b: Int) -> Int = {
+  let v = k_add(tape.tval(t, a), tape.tval(t, b))
+  let r = tape.trows(t, a)
+  let c = tape.tcols(t, a)
+  let rq = req2(t, a, b)
+  tape.push_node(t, v, r, c, 1, a, b, 0, rq)
+}
 
-fn mul(t: tape.Tape, a: Int, b: Int) -> tape.Tape = {
+fn mul(mut t: tape.Tape, a: Int, b: Int) -> Int = {
   let va = tape.tval(t, a)
   let vb = tape.tval(t, b)
   var out: List[Float] = []
   var i = 0
   while i < list.len(va) { list.push(out, (list.get(va, i) ?? 0.0) * (list.get(vb, i) ?? 0.0)); i = i + 1 }
-  tape.push_node(t, out, tape.trows(t, a), tape.tcols(t, a), 2, a, b, 0, req2(t, a, b))
+  let r = tape.trows(t, a)
+  let c = tape.tcols(t, a)
+  let rq = req2(t, a, b)
+  tape.push_node(t, out, r, c, 2, a, b, 0, rq)
 }
 
-fn sub(t: tape.Tape, a: Int, b: Int) -> tape.Tape = {
+fn sub(mut t: tape.Tape, a: Int, b: Int) -> Int = {
   let va = tape.tval(t, a)
   let vb = tape.tval(t, b)
   var out: List[Float] = []
   var i = 0
   while i < list.len(va) { list.push(out, (list.get(va, i) ?? 0.0) - (list.get(vb, i) ?? 0.0)); i = i + 1 }
-  tape.push_node(t, out, tape.trows(t, a), tape.tcols(t, a), 3, a, b, 0, req2(t, a, b))
+  let r = tape.trows(t, a)
+  let c = tape.tcols(t, a)
+  let rq = req2(t, a, b)
+  tape.push_node(t, out, r, c, 3, a, b, 0, rq)
 }
 
 // ── differentiable logic gate (DLGN building block) ──
@@ -91,7 +103,7 @@ fn relax(g: Int, a: Float, b: Float) -> Float =
 // gate_mix(logits[1x16], a[1x1], b[1x1]) -> out[1x1] = sum_g softmax(logits)_g * relax_g(a,b).
 // Grad flows to the GATE LOGITS (a,b are data, no grad in a single layer).
 // aux unused; the a,b node values are read at forward and the vjp recomputes them.
-fn gate_mix(t: tape.Tape, lg: Int, a: Int, b: Int) -> tape.Tape = {
+fn gate_mix(mut t: tape.Tape, lg: Int, a: Int, b: Int) -> Int = {
   let logits = tape.tval(t, lg)
   let av = list.get(tape.tval(t, a), 0) ?? 0.0
   let bv = list.get(tape.tval(t, b), 0) ?? 0.0
@@ -106,31 +118,34 @@ fn gate_mix(t: tape.Tape, lg: Int, a: Int, b: Int) -> tape.Tape = {
   var o = 0.0
   g = 0
   while g < 16 { o = o + ((list.get(es, g) ?? 0.0) / s) * relax(g, av, bv); g = g + 1 }
-  // store a,b in aux is not possible (ints); the vjp re-reads parent a,b values,
-  // so encode them by making a=lg's... no — store gate parents pa=lg, pb=a, and
-  // keep b reachable via a second slot. We pack b into the same node via op 11
-  // and recompute from pb chain: here pa=lg, pb=a; b index is lg+? Not robust.
-  // Simpler: record op 11 with pa=lg, pb=a, aux=b (b's node index fits in Int).
-  tape.push_node(t, [o], 1, 1, 11, lg, a, b, list.get(t.requires, lg) ?? false)
+  // op 11: gate node. pa=lg (the 1×16 logits, grad target), pb=a, aux=b — the
+  // vjp re-reads parent a,b values from their node indices (a,b are data).
+  let rq = list.get(t.requires, lg) ?? false
+  tape.push_node(t, [o], 1, 1, 11, lg, a, b, rq)
 }
 
-fn matmul(t: tape.Tape, a: Int, b: Int) -> tape.Tape = {
+fn matmul(mut t: tape.Tape, a: Int, b: Int) -> Int = {
   let ar = tape.trows(t, a)
   let ac = tape.tcols(t, a)
   let bc = tape.tcols(t, b)
-  tape.push_node(t, k_matmul(tape.tval(t, a), ar, ac, tape.tval(t, b), bc), ar, bc, 4, a, b, 0, req2(t, a, b))
+  let v = k_matmul(tape.tval(t, a), ar, ac, tape.tval(t, b), bc)
+  let rq = req2(t, a, b)
+  tape.push_node(t, v, ar, bc, 4, a, b, 0, rq)
 }
 
-fn relu(t: tape.Tape, a: Int) -> tape.Tape = {
+fn relu(mut t: tape.Tape, a: Int) -> Int = {
   let va = tape.tval(t, a)
   var out: List[Float] = []
   var i = 0
   while i < list.len(va) { let v = list.get(va, i) ?? 0.0; list.push(out, if v > 0.0 then v else 0.0); i = i + 1 }
-  tape.push_node(t, out, tape.trows(t, a), tape.tcols(t, a), 5, a, 0 - 1, 0, list.get(t.requires, a) ?? false)
+  let r = tape.trows(t, a)
+  let c = tape.tcols(t, a)
+  let rq = list.get(t.requires, a) ?? false
+  tape.push_node(t, out, r, c, 5, a, 0 - 1, 0, rq)
 }
 
 // add a (1×c) bias row broadcast over the rows of a (r×c). b is a 1×c node.
-fn add_bias(t: tape.Tape, a: Int, b: Int) -> tape.Tape = {
+fn add_bias(mut t: tape.Tape, a: Int, b: Int) -> Int = {
   let r = tape.trows(t, a)
   let c = tape.tcols(t, a)
   let va = tape.tval(t, a)
@@ -142,11 +157,12 @@ fn add_bias(t: tape.Tape, a: Int, b: Int) -> tape.Tape = {
     while j < c { list.push(out, (list.get(va, i * c + j) ?? 0.0) + (list.get(vb, j) ?? 0.0)); j = j + 1 }
     i = i + 1
   }
-  tape.push_node(t, out, r, c, 9, a, b, 0, req2(t, a, b))
+  let rq = req2(t, a, b)
+  tape.push_node(t, out, r, c, 9, a, b, 0, rq)
 }
 
 // cross-entropy on a single logits row (1×C), target class in aux; loss = 1×1.
-fn softmax_ce(t: tape.Tape, a: Int, target: Int) -> tape.Tape = {
+fn softmax_ce(mut t: tape.Tape, a: Int, target: Int) -> Int = {
   let z = tape.tval(t, a)
   let c = tape.tcols(t, a)
   var mx = list.get(z, 0) ?? 0.0
@@ -157,7 +173,8 @@ fn softmax_ce(t: tape.Tape, a: Int, target: Int) -> tape.Tape = {
   while j < c { s = s + math.exp((list.get(z, j) ?? 0.0) - mx); j = j + 1 }
   let logz = mx + math.log(s)
   let loss = logz - (list.get(z, target) ?? 0.0)
-  tape.push_node(t, [loss], 1, 1, 8, a, 0 - 1, target, list.get(t.requires, a) ?? false)
+  let rq = list.get(t.requires, a) ?? false
+  tape.push_node(t, [loss], 1, 1, 8, a, 0 - 1, target, rq)
 }
 
 // ── backward: seed output grad = ones, run tape in reverse depth order ──

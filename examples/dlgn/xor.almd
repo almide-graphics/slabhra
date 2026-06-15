@@ -32,17 +32,17 @@ fn build(logits: List[Float]) -> (tp.Tape, Int, Int) = {
   let bv = [0.0, 1.0, 0.0, 1.0]
   let tv = [0.0, 1.0, 1.0, 0.0]   // XOR
   var t = tp.new_tape()
-  t = tp.leaf(t, logits, 1, 16, true); let lg = tp.last(t)
+  let lg = tp.leaf(t, logits, 1, 16, true)
   var total = 0 - 1
   var i = 0
   while i < 4 {
-    t = tp.leaf(t, [list.get(av, i) ?? 0.0], 1, 1, false); let a = tp.last(t)
-    t = tp.leaf(t, [list.get(bv, i) ?? 0.0], 1, 1, false); let b = tp.last(t)
-    t = tp.leaf(t, [list.get(tv, i) ?? 0.0], 1, 1, false); let tg = tp.last(t)
-    t = op.gate_mix(t, lg, a, b); let pred = tp.last(t)
-    t = op.sub(t, pred, tg); let d = tp.last(t)
-    t = op.mul(t, d, d); let sq = tp.last(t)
-    if total < 0 then { total = sq } else { t = op.add(t, total, sq); total = tp.last(t) }
+    let a = tp.leaf(t, [list.get(av, i) ?? 0.0], 1, 1, false)
+    let b = tp.leaf(t, [list.get(bv, i) ?? 0.0], 1, 1, false)
+    let tg = tp.leaf(t, [list.get(tv, i) ?? 0.0], 1, 1, false)
+    let pred = op.gate_mix(t, lg, a, b)
+    let d = op.sub(t, pred, tg)
+    let sq = op.mul(t, d, d)
+    if total < 0 then { total = sq } else { total = op.add(t, total, sq) }
     i = i + 1
   }
   (t, total, lg)
