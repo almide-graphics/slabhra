@@ -36,8 +36,15 @@ fn tlen(t: Tape) -> Int = list.len(t.val)
 fn last(t: Tape) -> Int = list.len(t.val) - 1
 
 // push a node, returning the NEW tape. The node's index is `tlen(t)` of the
-// OLD tape (= last(returned)). Functional, not in-place: Almide can't push into
-// a `mut` record field, and the value-semantic owned tape is the point anyway.
+// OLD tape (= last(returned)).
+//
+// PERF NOTE: this rebuilds the record with `field + [x]` per push = O(n) per
+// push, O(n²) to build an n-node tape. Correct and fine for the current tiny
+// examples, but it caps model size. Root cause is an Almide gap: you cannot
+// `list.push` into a `mut`-record field (almide#703) — a bare `mut List` param
+// pushes in place fine. Once #703 lands, this becomes an O(1)-amortized
+// in-place push with the same record API; until then the value-semantic
+// functional tape is the correct (if quadratic) form.
 fn push_node(t: Tape, value: List[Float], r: Int, c: Int, op: Int,
              pa: Int, pb: Int, aux: Int, req: Bool) -> Tape = {
   let dpa = if pa >= 0 then list.get(t.depth, pa) ?? 0 else (0 - 1)
