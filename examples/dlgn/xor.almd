@@ -1,0 +1,87 @@
+// slabhra DLGN example — a differentiable logic-gate neuron learns XOR, then
+// hardens to an exact gate. Built entirely from slabhra primitives (gate_mix +
+// sub + mul for the squared error) + Adam from slabhra.optim. This is slabhra's
+// first real research client: the gate-native ML from nn/research/autograd,
+// now running on the library's tape/backward instead of a hand-rolled loop.
+//
+//   almide run examples/dlgn/xor.almd      (from the slabhra repo root)
+//
+// The 16 gate-selection logits are the parameter; softmax should converge onto
+// gate 6 (XOR); the hardened (argmax) gate must compute XOR on all 4 inputs.
+
+import self.tape as tp
+import self.ops as op
+import self.optim as opt
+
+fn gate_name(g: Int) -> String =
+  match g {
+    0 => "FALSE", 1 => "AND", 6 => "XOR", 7 => "OR", 9 => "XNOR", 14 => "NAND", _ => "g" + int.to_string(g),
+  }
+fn argmax16(xs: List[Float]) -> Int = {
+  var bi = 0
+  var bv = list.get(xs, 0) ?? 0.0
+  var g = 1
+  while g < 16 { let v = list.get(xs, g) ?? 0.0; if v > bv then { bv = v; bi = g }; g = g + 1 }
+  bi
+}
+
+// build tape: sum of squared errors over the 4 XOR examples, params = logits.
+// returns (tape, loss_node, logits_node).
+fn build(logits: List[Float]) -> (tp.Tape, Int, Int) = {
+  let av = [0.0, 0.0, 1.0, 1.0]
+  let bv = [0.0, 1.0, 0.0, 1.0]
+  let tv = [0.0, 1.0, 1.0, 0.0]   // XOR
+  var t = tp.new_tape()
+  t = tp.leaf(t, logits, 1, 16, true); let lg = tp.last(t)
+  var total = 0 - 1
+  var i = 0
+  while i < 4 {
+    t = tp.leaf(t, [list.get(av, i) ?? 0.0], 1, 1, false); let a = tp.last(t)
+    t = tp.leaf(t, [list.get(bv, i) ?? 0.0], 1, 1, false); let b = tp.last(t)
+    t = tp.leaf(t, [list.get(tv, i) ?? 0.0], 1, 1, false); let tg = tp.last(t)
+    t = op.gate_mix(t, lg, a, b); let pred = tp.last(t)
+    t = op.sub(t, pred, tg); let d = tp.last(t)
+    t = op.mul(t, d, d); let sq = tp.last(t)
+    if total < 0 then { total = sq } else { t = op.add(t, total, sq); total = tp.last(t) }
+    i = i + 1
+  }
+  (t, total, lg)
+}
+
+effect fn main() -> () = {
+  var logits = list.repeat(0.0, 16)
+  var st = opt.adam_init(16)
+  let lr = 0.2
+
+  var step = 0
+  while step < 300 {
+    let (t, loss, lg) = build(logits)
+    let grad = op.backward(t, loss)
+    let glg = list.get(grad, lg) ?? []
+    if step - (step / 100) * 100 == 0 then {
+      println("step " + int.to_string(step) + "  loss " + float.to_string(tp.item(t, loss)))
+    }
+    let (nl, ns) = opt.adam_step(logits, glg, st, step + 1, lr, 0.9, 0.999, 0.00000001)
+    logits = nl
+    st = ns
+    step = step + 1
+  }
+
+  let pick = argmax16(logits)
+  println("")
+  println("selected gate = " + int.to_string(pick) + " (" + gate_name(pick) + ")")
+
+  // harden: evaluate the picked gate (exact 0/1) on all 4 inputs vs XOR
+  let av = [0.0, 0.0, 1.0, 1.0]
+  let bv = [0.0, 1.0, 0.0, 1.0]
+  let tv = [0.0, 1.0, 1.0, 0.0]
+  var correct = 0
+  var i = 0
+  while i < 4 {
+    let y = op.relax(pick, list.get(av, i) ?? 0.0, list.get(bv, i) ?? 0.0)
+    if y == (list.get(tv, i) ?? 0.0) then { correct = correct + 1 }
+    i = i + 1
+  }
+  println("hardened circuit: " + int.to_string(correct) + "/4 exact"
+    + (if correct == 4 then "  ✓ learned XOR (via slabhra)" else "  ✗"))
+}

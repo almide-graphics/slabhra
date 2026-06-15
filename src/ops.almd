@@ -68,6 +68,52 @@ fn mul(t: tape.Tape, a: Int, b: Int) -> tape.Tape = {
   tape.push_node(t, out, tape.trows(t, a), tape.tcols(t, a), 2, a, b, 0, req2(t, a, b))
 }
 
+fn sub(t: tape.Tape, a: Int, b: Int) -> tape.Tape = {
+  let va = tape.tval(t, a)
+  let vb = tape.tval(t, b)
+  var out: List[Float] = []
+  var i = 0
+  while i < list.len(va) { list.push(out, (list.get(va, i) ?? 0.0) - (list.get(vb, i) ?? 0.0)); i = i + 1 }
+  tape.push_node(t, out, tape.trows(t, a), tape.tcols(t, a), 3, a, b, 0, req2(t, a, b))
+}
+
+// ── differentiable logic gate (DLGN building block) ──
+// 16 two-input boolean gate relaxations f_g(a,b), a,b in [0,1].
+fn relax(g: Int, a: Float, b: Float) -> Float =
+  if g == 0 then 0.0 else if g == 1 then a * b else if g == 2 then a - a * b
+  else if g == 3 then a else if g == 4 then b - a * b else if g == 5 then b
+  else if g == 6 then a + b - 2.0 * a * b else if g == 7 then a + b - a * b
+  else if g == 8 then 1.0 - (a + b - a * b) else if g == 9 then 1.0 - (a + b - 2.0 * a * b)
+  else if g == 10 then 1.0 - b else if g == 11 then 1.0 - b + a * b
+  else if g == 12 then 1.0 - a else if g == 13 then 1.0 - a + a * b
+  else if g == 14 then 1.0 - a * b else 1.0
+
+// gate_mix(logits[1x16], a[1x1], b[1x1]) -> out[1x1] = sum_g softmax(logits)_g * relax_g(a,b).
+// Grad flows to the GATE LOGITS (a,b are data, no grad in a single layer).
+// aux unused; the a,b node values are read at forward and the vjp recomputes them.
+fn gate_mix(t: tape.Tape, lg: Int, a: Int, b: Int) -> tape.Tape = {
+  let logits = tape.tval(t, lg)
+  let av = list.get(tape.tval(t, a), 0) ?? 0.0
+  let bv = list.get(tape.tval(t, b), 0) ?? 0.0
+  // softmax over 16
+  var mx = list.get(logits, 0) ?? 0.0
+  var g = 1
+  while g < 16 { let v = list.get(logits, g) ?? 0.0; if v > mx then { mx = v }; g = g + 1 }
+  var es: List[Float] = []
+  var s = 0.0
+  g = 0
+  while g < 16 { let e = math.exp((list.get(logits, g) ?? 0.0) - mx); list.push(es, e); s = s + e; g = g + 1 }
+  var o = 0.0
+  g = 0
+  while g < 16 { o = o + ((list.get(es, g) ?? 0.0) / s) * relax(g, av, bv); g = g + 1 }
+  // store a,b in aux is not possible (ints); the vjp re-reads parent a,b values,
+  // so encode them by making a=lg's... no — store gate parents pa=lg, pb=a, and
+  // keep b reachable via a second slot. We pack b into the same node via op 11
+  // and recompute from pb chain: here pa=lg, pb=a; b index is lg+? Not robust.
+  // Simpler: record op 11 with pa=lg, pb=a, aux=b (b's node index fits in Int).
+  tape.push_node(t, [o], 1, 1, 11, lg, a, b, list.get(t.requires, lg) ?? false)
+}
+
 fn matmul(t: tape.Tape, a: Int, b: Int) -> tape.Tape = {
   let ar = tape.trows(t, a)
   let ac = tape.tcols(t, a)
@@ -141,6 +187,34 @@ fn backward(t: tape.Tape, out: Int) -> List[List[Float]] = {
         if op == 1 then {                          // add: dA = dB = gi
           grad = acc(grad, a, gi)
           grad = acc(grad, b, gi)
+        } else if op == 3 then {                   // sub: dA = gi, dB = -gi
+          grad = acc(grad, a, gi)
+          var ng: List[Float] = []
+          var k = 0
+          while k < list.len(gi) { list.push(ng, 0.0 - (list.get(gi, k) ?? 0.0)); k = k + 1 }
+          grad = acc(grad, b, ng)
+        } else if op == 11 then {                  // gate_mix: dlogits = gi*(p_g*(relax_g - out))
+          let logits = tape.tval(t, a)             // pa = logits node
+          let bn = list.get(t.aux, i) ?? 0         // aux = b node index
+          let av = list.get(tape.tval(t, b), 0) ?? 0.0   // pb = a node
+          let bv = list.get(tape.tval(t, bn), 0) ?? 0.0
+          let out = list.get(tape.tval(t, i), 0) ?? 0.0
+          let go = list.get(gi, 0) ?? 0.0
+          var mx = list.get(logits, 0) ?? 0.0
+          var k = 1
+          while k < 16 { let v = list.get(logits, k) ?? 0.0; if v > mx then { mx = v }; k = k + 1 }
+          var es: List[Float] = []
+          var s = 0.0
+          k = 0
+          while k < 16 { let e = math.exp((list.get(logits, k) ?? 0.0) - mx); list.push(es, e); s = s + e; k = k + 1 }
+          var dl: List[Float] = []
+          k = 0
+          while k < 16 {
+            let p = (list.get(es, k) ?? 0.0) / s
+            list.push(dl, go * p * (relax(k, av, bv) - out))
+            k = k + 1
+          }
+          grad = acc(grad, a, dl)
         } else if op == 2 then {                   // mul (elemwise): dA = gi*B, dB = gi*A
           grad = acc(grad, a, k_emul(gi, tape.tval(t, b)))
           grad = acc(grad, b, k_emul(gi, tape.tval(t, a)))
