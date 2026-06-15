@@ -1,0 +1,70 @@
+// slabhra.tape — the reverse-mode autograd tape.
+//
+// A Tensor is an INDEX into parallel tape arrays (not an object with a shared-
+// mutable .grad — that clashes with value semantics, the way Burn's global
+// Arc-registry is a workaround for Rust not owning the tensor type). The tape
+// is an explicit value threaded through the program; backward() runs once over
+// it. Borrowed from Burn: depth = max(parents)+1, and backward iterates depth
+// buckets in reverse → correct reverse-topological order with no sort.
+//
+// This module is dtype-agnostic on VALUES: a node's value is a flat List[Float]
+// plus a shape (rows, cols). Scalars are 1x1. ops.almd fills in op math + vjp.
+
+// op codes (see ops.almd for the vjp of each)
+//  0 leaf        1 add         2 mul(elemwise)  3 sub        4 matmul
+//  5 relu        6 neg         7 sum_all        8 softmax_ce(logits; target=aux)
+//  9 add_bias    10 scale(aux-encoded k via param list)
+
+type Tape = {
+  val: List[List[Float]],   // node value, flat row-major
+  rows: List[Int],
+  cols: List[Int],
+  op: List[Int],
+  pa: List[Int],            // parent a (-1 = none)
+  pb: List[Int],            // parent b (-1 = none)
+  aux: List[Int],           // op-specific int (e.g. target class, axis)
+  depth: List[Int],         // max(parent depth)+1, 0 for leaf
+  requires: List[Bool],     // does grad flow into this node?
+}
+
+fn new_tape() -> Tape = {
+  val: [], rows: [], cols: [], op: [], pa: [], pb: [], aux: [], depth: [], requires: [],
+}
+
+fn tlen(t: Tape) -> Int = list.len(t.val)
+// index of the node just appended (use after a push_*/op returns the new tape)
+fn last(t: Tape) -> Int = list.len(t.val) - 1
+
+// push a node, returning the NEW tape. The node's index is `tlen(t)` of the
+// OLD tape (= last(returned)). Functional, not in-place: Almide can't push into
+// a `mut` record field, and the value-semantic owned tape is the point anyway.
+fn push_node(t: Tape, value: List[Float], r: Int, c: Int, op: Int,
+             pa: Int, pb: Int, aux: Int, req: Bool) -> Tape = {
+  let dpa = if pa >= 0 then list.get(t.depth, pa) ?? 0 else (0 - 1)
+  let dpb = if pb >= 0 then list.get(t.depth, pb) ?? 0 else (0 - 1)
+  let d = (if dpa > dpb then dpa else dpb) + 1
+  {
+    val: t.val + [value],
+    rows: t.rows + [r],
+    cols: t.cols + [c],
+    op: t.op + [op],
+    pa: t.pa + [pa],
+    pb: t.pb + [pb],
+    aux: t.aux + [aux],
+    depth: t.depth + [d],
+    requires: t.requires + [req],
+  }
+}
+
+// a leaf tensor (parameter / input). req = whether to track its gradient.
+fn leaf(t: Tape, value: List[Float], r: Int, c: Int, req: Bool) -> Tape =
+  push_node(t, value, r, c, 0, 0 - 1, 0 - 1, 0, req)
+
+// accessors
+fn tval(t: Tape, i: Int) -> List[Float] = list.get(t.val, i) ?? []
+fn trows(t: Tape, i: Int) -> Int = list.get(t.rows, i) ?? 0
+fn tcols(t: Tape, i: Int) -> Int = list.get(t.cols, i) ?? 0
+
+// scalar convenience
+fn scalar(t: Tape, x: Float, req: Bool) -> Tape = leaf(t, [x], 1, 1, req)
+fn item(t: Tape, i: Int) -> Float = list.get(tval(t, i), 0) ?? 0.0

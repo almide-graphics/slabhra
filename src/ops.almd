@@ -1,0 +1,220 @@
+// slabhra.ops — tensor ops, their vjp, and the backward pass.
+//
+// Each op computes its forward value with a small kernel, then records a node.
+// backward() seeds the output grad and runs the tape in reverse-DEPTH order,
+// each op routing grad to its parents. vjps reuse the forward kernels (no
+// re-implemented math), exactly as in Burn.
+
+import self.tape
+
+// ── flat-tensor kernels (row-major List[Float]) ──
+
+fn k_matmul(a: List[Float], ar: Int, ac: Int, b: List[Float], bc: Int) -> List[Float] = {
+  var out: List[Float] = []
+  var i = 0
+  while i < ar {
+    var j = 0
+    while j < bc {
+      var s = 0.0
+      var p = 0
+      while p < ac {
+        s = s + (list.get(a, i * ac + p) ?? 0.0) * (list.get(b, p * bc + j) ?? 0.0)
+        p = p + 1
+      }
+      list.push(out, s)
+      j = j + 1
+    }
+    i = i + 1
+  }
+  out
+}
+
+fn k_transpose(a: List[Float], r: Int, c: Int) -> List[Float] = {
+  var out = list.repeat(0.0, r * c)
+  var i = 0
+  while i < r {
+    var j = 0
+    while j < c {
+      out = list.set(out, j * r + i, list.get(a, i * c + j) ?? 0.0)
+      j = j + 1
+    }
+    i = i + 1
+  }
+  out
+}
+
+fn k_add(a: List[Float], b: List[Float]) -> List[Float] = {
+  var out: List[Float] = []
+  var i = 0
+  while i < list.len(a) { list.push(out, (list.get(a, i) ?? 0.0) + (list.get(b, i) ?? 0.0)); i = i + 1 }
+  out
+}
+
+// ── ops (forward + record) ──
+// Each returns the NEW tape; the new node's index is tape.last(returned).
+fn req2(t: tape.Tape, a: Int, b: Int) -> Bool =
+  (list.get(t.requires, a) ?? false) or (list.get(t.requires, b) ?? false)
+
+fn add(t: tape.Tape, a: Int, b: Int) -> tape.Tape =
+  tape.push_node(t, k_add(tape.tval(t, a), tape.tval(t, b)),
+    tape.trows(t, a), tape.tcols(t, a), 1, a, b, 0, req2(t, a, b))
+
+fn mul(t: tape.Tape, a: Int, b: Int) -> tape.Tape = {
+  let va = tape.tval(t, a)
+  let vb = tape.tval(t, b)
+  var out: List[Float] = []
+  var i = 0
+  while i < list.len(va) { list.push(out, (list.get(va, i) ?? 0.0) * (list.get(vb, i) ?? 0.0)); i = i + 1 }
+  tape.push_node(t, out, tape.trows(t, a), tape.tcols(t, a), 2, a, b, 0, req2(t, a, b))
+}
+
+fn matmul(t: tape.Tape, a: Int, b: Int) -> tape.Tape = {
+  let ar = tape.trows(t, a)
+  let ac = tape.tcols(t, a)
+  let bc = tape.tcols(t, b)
+  tape.push_node(t, k_matmul(tape.tval(t, a), ar, ac, tape.tval(t, b), bc), ar, bc, 4, a, b, 0, req2(t, a, b))
+}
+
+fn relu(t: tape.Tape, a: Int) -> tape.Tape = {
+  let va = tape.tval(t, a)
+  var out: List[Float] = []
+  var i = 0
+  while i < list.len(va) { let v = list.get(va, i) ?? 0.0; list.push(out, if v > 0.0 then v else 0.0); i = i + 1 }
+  tape.push_node(t, out, tape.trows(t, a), tape.tcols(t, a), 5, a, 0 - 1, 0, list.get(t.requires, a) ?? false)
+}
+
+// add a (1×c) bias row broadcast over the rows of a (r×c). b is a 1×c node.
+fn add_bias(t: tape.Tape, a: Int, b: Int) -> tape.Tape = {
+  let r = tape.trows(t, a)
+  let c = tape.tcols(t, a)
+  let va = tape.tval(t, a)
+  let vb = tape.tval(t, b)
+  var out: List[Float] = []
+  var i = 0
+  while i < r {
+    var j = 0
+    while j < c { list.push(out, (list.get(va, i * c + j) ?? 0.0) + (list.get(vb, j) ?? 0.0)); j = j + 1 }
+    i = i + 1
+  }
+  tape.push_node(t, out, r, c, 9, a, b, 0, req2(t, a, b))
+}
+
+// cross-entropy on a single logits row (1×C), target class in aux; loss = 1×1.
+fn softmax_ce(t: tape.Tape, a: Int, target: Int) -> tape.Tape = {
+  let z = tape.tval(t, a)
+  let c = tape.tcols(t, a)
+  var mx = list.get(z, 0) ?? 0.0
+  var j = 1
+  while j < c { let v = list.get(z, j) ?? 0.0; if v > mx then { mx = v }; j = j + 1 }
+  var s = 0.0
+  j = 0
+  while j < c { s = s + math.exp((list.get(z, j) ?? 0.0) - mx); j = j + 1 }
+  let logz = mx + math.log(s)
+  let loss = logz - (list.get(z, target) ?? 0.0)
+  tape.push_node(t, [loss], 1, 1, 8, a, 0 - 1, target, list.get(t.requires, a) ?? false)
+}
+
+// ── backward: seed output grad = ones, run tape in reverse depth order ──
+
+fn backward(t: tape.Tape, out: Int) -> List[List[Float]] = {
+  let n = tape.tlen(t)
+  // grad[i] = accumulated gradient tensor for node i (flat, same shape as val)
+  var grad: List[List[Float]] = []
+  var i = 0
+  while i < n { list.push(grad, list.repeat(0.0, list.len(tape.tval(t, i)))); i = i + 1 }
+  // seed: d(out)/d(out) = 1 over out's shape
+  grad = list.set(grad, out, list.repeat(1.0, list.len(tape.tval(t, out))))
+
+  // process nodes by DECREASING depth (Burn's order trick). Bucket by depth.
+  var maxd = 0
+  i = 0
+  while i < n { let d = list.get(t.depth, i) ?? 0; if d > maxd then { maxd = d }; i = i + 1 }
+  var d = maxd
+  while d >= 0 {
+    i = 0
+    while i < n {
+      if (list.get(t.depth, i) ?? 0) == d then {
+        let gi = list.get(grad, i) ?? []
+        let op = list.get(t.op, i) ?? 0
+        let a = list.get(t.pa, i) ?? (0 - 1)
+        let b = list.get(t.pb, i) ?? (0 - 1)
+        if op == 1 then {                          // add: dA = dB = gi
+          grad = acc(grad, a, gi)
+          grad = acc(grad, b, gi)
+        } else if op == 2 then {                   // mul (elemwise): dA = gi*B, dB = gi*A
+          grad = acc(grad, a, k_emul(gi, tape.tval(t, b)))
+          grad = acc(grad, b, k_emul(gi, tape.tval(t, a)))
+        } else if op == 4 then {                   // matmul: dA = gi·Bᵀ, dB = Aᵀ·gi
+          let ar = tape.trows(t, a)
+          let ac = tape.tcols(t, a)
+          let bc = tape.tcols(t, b)
+          let bt = k_transpose(tape.tval(t, b), ac, bc)
+          let at = k_transpose(tape.tval(t, a), ar, ac)
+          grad = acc(grad, a, k_matmul(gi, ar, bc, bt, ac))
+          grad = acc(grad, b, k_matmul(at, ac, ar, gi, bc))
+        } else if op == 5 then {                   // relu: dA = gi ⊙ (val>0)
+          let va = tape.tval(t, i)
+          var dr: List[Float] = []
+          var k = 0
+          while k < list.len(va) { list.push(dr, if (list.get(va, k) ?? 0.0) > 0.0 then list.get(gi, k) ?? 0.0 else 0.0); k = k + 1 }
+          grad = acc(grad, a, dr)
+        } else if op == 9 then {                   // add_bias: dA = gi, dBias = colsum(gi)
+          grad = acc(grad, a, gi)
+          let r = tape.trows(t, i)
+          let c = tape.tcols(t, i)
+          var bs = list.repeat(0.0, c)
+          var rr = 0
+          while rr < r {
+            var cc = 0
+            while cc < c { bs = list.set(bs, cc, (list.get(bs, cc) ?? 0.0) + (list.get(gi, rr * c + cc) ?? 0.0)); cc = cc + 1 }
+            rr = rr + 1
+          }
+          grad = acc(grad, b, bs)
+        } else if op == 8 then {                   // softmax_ce: dZ = (softmax(z) - onehot)*gi
+          let z = tape.tval(t, a)
+          let c = tape.tcols(t, a)
+          let target = list.get(t.aux, i) ?? 0
+          var mx = list.get(z, 0) ?? 0.0
+          var j = 1
+          while j < c { let v = list.get(z, j) ?? 0.0; if v > mx then { mx = v }; j = j + 1 }
+          var es: List[Float] = []
+          var s = 0.0
+          j = 0
+          while j < c { let e = math.exp((list.get(z, j) ?? 0.0) - mx); list.push(es, e); s = s + e; j = j + 1 }
+          let scale = list.get(gi, 0) ?? 0.0
+          var dz: List[Float] = []
+          j = 0
+          while j < c {
+            let p = (list.get(es, j) ?? 0.0) / s
+            let oh = if j == target then 1.0 else 0.0
+            list.push(dz, (p - oh) * scale)
+            j = j + 1
+          }
+          grad = acc(grad, a, dz)
+        }
+      }
+      i = i + 1
+    }
+    d = d - 1
+  }
+  grad
+}
+
+// accumulate g into grad[idx] (skip leaves with idx<0)
+fn acc(grad: List[List[Float]], idx: Int, g: List[Float]) -> List[List[Float]] = {
+  if idx < 0 then grad
+  else {
+    let old = list.get(grad, idx) ?? []
+    var out: List[Float] = []
+    var i = 0
+    while i < list.len(g) { list.push(out, (list.get(old, i) ?? 0.0) + (list.get(g, i) ?? 0.0)); i = i + 1 }
+    list.set(grad, idx, out)
+  }
+}
+
+fn k_emul(a: List[Float], b: List[Float]) -> List[Float] = {
+  var out: List[Float] = []
+  var i = 0
+  while i < list.len(a) { list.push(out, (list.get(a, i) ?? 0.0) * (list.get(b, i) ?? 0.0)); i = i + 1 }
+  out
+}
