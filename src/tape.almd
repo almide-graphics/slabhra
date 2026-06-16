@@ -44,12 +44,9 @@ fn last(t: Tape) -> Int = list.len(t.val) - 1
 // The parent-depth reads are bound to lets BEFORE the pushes so the immutable
 // reads of `t.depth` finish before the mutable borrow for the pushes begins.
 //
-// TARGET: this in-place tape is NATIVE. A `mut`-list-field push does not yet
-// persist on the wasm target (a reallocating push moves the inline list header
-// and the new pointer is not written back to the caller — almide#705). That is
-// fine for slabhra: the tape is a TRAINING structure and training is native;
-// the browser runs INFERENCE (forward only, no tape). Once #704 lands the same
-// code is bit-identical on wasm with no source change.
+// CROSS-TARGET: in-place record-field push is bit-identical on native and wasm
+// (almide#703 + #705). The whole library — MLP forward/backward, training, the
+// DLGN gate network — produces byte-identical output on both targets.
 fn push_node(mut t: Tape, value: List[Float], r: Int, c: Int, op: Int,
              pa: Int, pb: Int, aux: Int, req: Bool) -> Int = {
   let dpa = if pa >= 0 then list.get(t.depth, pa) ?? 0 else (0 - 1)

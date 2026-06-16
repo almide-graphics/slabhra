@@ -38,13 +38,13 @@ of a **verifiable, multi-target language** rather than a library on top of one:
   liveness — most of that machinery is a *workaround* for the host language not
   owning the tensor type. Almide owns the tensor type, so `slabhra` keeps an
   **explicit, owned tape** and deletes that entire runtime.
-- **Verifiable across targets.** The same model's *inference* (forward pass)
-  compiles to CPU-SIMD / WASM / WebGPU and stays **bit-identical** across them
-  (the discipline that took nn's LLM engine to a 1e-6 match with PyTorch and a
-  bit-exact native↔wasm↔WGSL logic circuit). The autograd *tape* — a training
-  structure — is in-place O(1) on **native** (you train native; the browser runs
-  inference). Its wasm `mut`-list-append writeback is pending almide#705; until
-  then training is native-only, with no source change needed once it lands.
+- **Verifiable across targets.** The same source compiles to CPU-SIMD / WASM /
+  WebGPU and stays **bit-identical** across them (the discipline that took nn's
+  LLM engine to a 1e-6 match with PyTorch and a bit-exact native↔wasm↔WGSL logic
+  circuit). This holds for the autograd *tape* too: forward, backward, and
+  training produce byte-identical output on native and wasm (the in-place O(1)
+  tape needed almide#703 + #705 to land — record-field push and the loop-arena
+  escape rules — and now does).
 - **Non-standard primitives are first-class.** Differentiable logic gates
   (DLGN), ternary, matmul-free — substrates PyTorch/Burn treat as exotic — are
   ordinary ops here. The first examples are gate-native, not FP-matrix-native.
