@@ -34,9 +34,9 @@ fn adam_init(n: Int) -> AdamState = { m: list.repeat(0.0, n), v: list.repeat(0.0
 // returns (new_value, new_state).
 fn adam_step(value: List[Float], grad: List[Float], st: AdamState, t: Int,
              lr: Float, b1: Float, b2: Float, eps: Float) -> (List[Float], AdamState) = {
-  let tt = int.to_float(t)
-  let bc1 = 1.0 - math.fpow(b1, tt)
-  let bc2 = 1.0 - math.fpow(b2, tt)
+  let tt = float.from(t)
+  let bc1 = 1.0 - float.pow(b1, tt)
+  let bc2 = 1.0 - float.pow(b2, tt)
   var nv: List[Float] = []
   var nm: List[Float] = []
   var nvv: List[Float] = []
